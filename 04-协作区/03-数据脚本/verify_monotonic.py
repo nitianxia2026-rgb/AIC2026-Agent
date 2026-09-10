@@ -95,18 +95,26 @@ def main():
     if data is None:
         results.append(("02-转化端基准", "文件存在", "FAIL", "先运行 build_benchmark.py"))
     else:
-        fails, small_groups = [], []
+        fails, warns = [], []
         for r in data:
             p25, p50, p75 = fnum(r["P25"]), fnum(r["P50"]), fnum(r["P75"])
             if None in (p25, p50, p75) or not (p25 <= p50 <= p75):
                 fails.append(f"{r['分组']} {r['指标']}：分位数乱序")
+                continue
             if r["指标"] in ("订单转化率", "平均注册率"):
-                v = p50
-                if v is not None and not (0 < v <= 1):
-                    fails.append(f"{r['分组']} {r['指标']}：P50={v} 不是合法比率")
+                if p75 is not None and (p75 < 0 or p75 > 1):
+                    fails.append(f"{r['分组']} {r['指标']}：P75={p75} 不是合法比率（应在 0–1）")
+                elif p50 == 0:
+                    warns.append(f"{r['分组']} {r['指标']}：P50=0（过半样本为零——真实数据允许，"
+                                 f"但该组该指标区分度弱；口径说明须注明，回答时引用 P75 而非 P50）")
         status = "PASS" if not fails else "FAIL"
-        results.append(("02-转化端基准", f"{len(data)-1} 行：分位数有序 + 率值合法", status,
-                        "全部通过" if not fails else "；".join(fails[:5])))
+        if fails:
+            detail = "；".join(fails[:5])
+        elif warns:
+            detail = "PASS（带提示）：；".join(warns[:4])
+        else:
+            detail = "全部通过"
+        results.append(("02-转化端基准", f"{len(data)-1} 行：分位数有序 + 率值合法（0 允许，超界才 FAIL）", status, detail))
 
     # ---- 报告 ----
     md = ["# 校验报告（自动生成）", ""]

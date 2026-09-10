@@ -71,7 +71,11 @@ def lognormal_samples(base, n, rng, noise=NOISE):
 
 
 def load_cvr_anchor():
-    """从真实/兜底基准表读 (广告类型 × 素材类型) → 订单转化率 P50，作 CVR 锚。"""
+    """从真实/兜底基准表读 (广告类型 × 素材类型) → 订单转化率 P50，作 CVR 锚。
+    只收 0.5%–15% 量级的锚：飞桨渠道级历史观测 CVR 常在万分位（P50≈0），
+    那是"历史渠道的水平"，不是中小企业客户可达的漏斗转化率，直接引用会让演示失真。
+    另外真实表分组口径（横幅/banner/jpg…）与合成表（信息流/搜索/视频…）对不上，
+    所以真实数据下通常是空锚 + 诚实标注，而不是硬凑。"""
     path = os.path.join("outputs", "02-基准表-转化端.csv")
     anchor, source = {}, "合成默认 2%"
     if os.path.exists(path):
@@ -83,12 +87,16 @@ def load_cvr_anchor():
                             p50 = float(row["P50"])
                         except (ValueError, KeyError, TypeError):
                             continue
+                        if not (0.005 <= p50 <= 0.15):
+                            continue   # 量级不适合做漏斗锚点，宁用合成默认并声明
                         parts = [p.strip() for p in row["分组"].split("×")]
                         if len(parts) == 3:
                             key = (parts[1], parts[2])
                             anchor[key] = p50
             if anchor:
-                source = f"真实基准表 02 的订单转化率 P50（{len(anchor)} 组）"
+                source = f"真实基准表 02 的订单转化率 P50（引用 {len(anchor)} 组）"
+            else:
+                source = "合成默认 2%（02 表存在，但口径不匹配/量级不适合，未引用）"
         except Exception as e:
             print(f"  [警告] 读取 {path} 失败（{e}），CVR 用合成默认")
     return anchor, source
@@ -151,7 +159,9 @@ def main():
        f"CVR 锚定来源：{cvr_source}。不冒充真实大盘，答辩与对用户口径均须声明。")
     ap("3. 分组维度：行业 × 广告类型 × 素材类型（搜索广告无素材维度，记'不限'）。")
     ap("4. 分位数怎么读：P25–P75 = 建议区间；P50 = 典型水平。")
-    ap("5. 使用限制：合成数据仅用于'量级感与区间话术'，配合公式与计算器实算使用；禁精确预测表述。")
+    ap("5. 使用限制：合成数据仅用于'量级感与区间话术'，配合公式与计算器实算使用；禁精确预测表述。"
+       "本表与真实转化端基准（02 表）口径不同——02 是飞桨历史渠道观测值，本表是行业常识锚点，"
+       "两表各管各的，回答时各引各的表，不可互相换算。")
     ap("")
     ap("## 合成假设表（可复核）")
     ap("")
