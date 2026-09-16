@@ -1,0 +1,10 @@
+{
+  "url": "https://aigc.zygcdata.com/workspace/chat/assistant/auth/06e8a9fe6986474f8599fc18e38bc37c",
+  "results": [
+    {
+      "status": "error",
+      "error": "Error: 等待助手回答超时（90000ms）",
+      "url": "https://aigc.zygcdata.com/workspace/chat/assistant/auth/06e8a9fe6986474f8599fc18e38bc37c"
+    }
+  ]
+}
