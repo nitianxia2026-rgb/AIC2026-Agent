@@ -17,9 +17,32 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SEED = 42
-PARAM_VERSION = "bid-sim-v1.0"
+PARAM_VERSION = "bid-sim-v1.4"
 MULTIPLIERS = (0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.5)
 INDUSTRIES = ("餐饮美食", "教育培训", "电商零售", "本地服务", "家居建材")
+INDUSTRY_ALIASES = {
+    "餐饮": "餐饮美食", "餐饮业": "餐饮美食",
+    "餐饮行业": "餐饮美食", "餐饮类": "餐饮美食", "餐饮门店": "餐饮美食",
+    "奶茶店": "餐饮美食", "咖啡店": "餐饮美食", "餐厅": "餐饮美食",
+    "教育": "教育培训", "教培": "教育培训",
+    "教育行业": "教育培训", "培训": "教育培训",
+    "电商": "电商零售",
+    "电商行业": "电商零售", "网店": "电商零售",
+    "本地生活": "本地服务",
+    "本地服务业": "本地服务",
+    "家装": "家居建材",
+    "家装行业": "家居建材", "建材": "家居建材",
+}
+AD_TYPE_ALIASES = {
+    "信息流": "信息流广告", "信息流广告": "信息流广告", "抖音信息流": "信息流广告",
+    "开屏": "开屏广告", "开屏广告": "开屏广告", "搜索": "搜索广告", "搜索广告": "搜索广告",
+}
+OBJECTIVE_ALIASES = {
+    "获客": "留资", "获客转化": "留资", "收集联系方式": "留资", "收集客户联系方式": "留资",
+    "留资转化": "留资", "曝光量": "曝光", "点击量": "点击", "成交": "下单",
+}
+BILLING_ALIASES = {"cpm": "CPM", "千次展示": "CPM", "千次曝光": "CPM", "cpc": "CPC", "点击付费": "CPC"}
+MATERIAL_ALIASES = {"图片": "图文", "图文广告": "图文", "视频广告": "视频", "短视频": "视频"}
 AD_CONFIG = {
     "信息流广告": {"billing": "CPM", "material": "图文", "alpha": 1.55, "beta": 1.00},
     "开屏广告": {"billing": "CPM", "material": "图文", "alpha": 1.35, "beta": 1.10},
@@ -43,6 +66,41 @@ def f(value: str | float | int) -> float:
     return float(value)
 
 
+def normalize_request(request: dict) -> dict:
+    """把受控的自然语言简称映射为稳定枚举，不做无限模糊猜测或补造业务状态。"""
+    normalized = dict(request)
+    def clean(value: object) -> str:
+        return str(value).strip().replace(" ", "").replace("　", "")
+    industry = clean(normalized["industry"]) if isinstance(normalized.get("industry"), str) else normalized.get("industry")
+    ad_type = clean(normalized["ad_type"]) if isinstance(normalized.get("ad_type"), str) else normalized.get("ad_type")
+    objective = clean(normalized["objective"]) if isinstance(normalized.get("objective"), str) else normalized.get("objective")
+    if isinstance(industry, str):
+        normalized["industry"] = INDUSTRY_ALIASES.get(industry, industry)
+    if isinstance(ad_type, str):
+        normalized["ad_type"] = AD_TYPE_ALIASES.get(ad_type, ad_type)
+    if isinstance(objective, str):
+        normalized["objective"] = OBJECTIVE_ALIASES.get(objective, objective)
+    if isinstance(normalized.get("billing_type"), str):
+        billing = clean(normalized["billing_type"])
+        normalized["billing_type"] = BILLING_ALIASES.get(billing.lower(), billing.upper())
+    if isinstance(normalized.get("material"), str):
+        material = clean(normalized["material"])
+        normalized["material"] = MATERIAL_ALIASES.get(material, material)
+    if isinstance(normalized.get("tracking_ready"), str):
+        value = clean(normalized["tracking_ready"]).lower()
+        if value in {"true", "yes", "是", "已配置", "正常", "就绪"}:
+            normalized["tracking_ready"] = True
+        elif value in {"false", "no", "否", "未配置", "未就绪", "未准备"}:
+            normalized["tracking_ready"] = False
+    if isinstance(normalized.get("audit_status"), str):
+        audit = clean(normalized["audit_status"])
+        if audit.lower() in {"passed", "pass", "approved", "通过", "已通过"}:
+            normalized["audit_status"] = "通过"
+        elif audit.lower() in {"failed", "fail", "rejected", "未通过", "不通过"}:
+            normalized["audit_status"] = "未通过"
+    return normalized
+
+
 def load_benchmarks(path: Path) -> dict[tuple[str, str, str], dict[str, dict[str, float]]]:
     table: dict[tuple[str, str, str], dict[str, dict[str, float]]] = {}
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -55,14 +113,21 @@ def load_benchmarks(path: Path) -> dict[tuple[str, str, str], dict[str, dict[str
     return table
 
 
-def response(k: float, alpha: float, beta: float) -> float:
-    share = k**alpha / (k**alpha + beta)
-    base_share = 1.0 / (1.0 + beta)
-    return share / base_share
+def auction_share(relative_bid: float, alpha: float, beta: float) -> float:
+    """合成竞争份额；relative_bid=用户出价/同组P50成本锚点。"""
+    q = max(relative_bid, 0.05)
+    return q**alpha / (q**alpha + beta)
+
+
+def response(candidate_ratio: float, current_ratio: float, alpha: float, beta: float) -> float:
+    """候选价相对当前价的交付变化，而非只看固定倍率。"""
+    return auction_share(candidate_ratio, alpha, beta) / auction_share(current_ratio, alpha, beta)
 
 
 def validate_request(request: dict) -> list[str]:
-    required = ("industry", "ad_type", "objective", "daily_budget", "current_bid")
+    required = (
+        "industry", "ad_type", "objective", "daily_budget", "current_bid", "spend_ratio"
+    )
     missing = [name for name in required if request.get(name) in (None, "")]
     if missing:
         return ["MISSING_" + name.upper() for name in missing]
@@ -75,11 +140,23 @@ def validate_request(request: dict) -> list[str]:
         return ["BILLING_TYPE_MISMATCH"]
     if request["objective"] not in OBJECTIVES:
         return ["UNSUPPORTED_OBJECTIVE"]
-    if f(request["daily_budget"]) <= 0 or f(request["current_bid"]) <= 0:
+    try:
+        daily_budget = f(request["daily_budget"])
+        current_bid = f(request["current_bid"])
+        spend_ratio = f(request["spend_ratio"])
+    except (TypeError, ValueError):
+        return ["INVALID_NUMERIC_INPUT"]
+    if not all(math.isfinite(value) for value in (daily_budget, current_bid, spend_ratio)):
+        return ["INVALID_NUMERIC_INPUT"]
+    if daily_budget <= 0 or current_bid <= 0:
         return ["NON_POSITIVE_INPUT"]
-    if request.get("audit_status", "通过") != "通过":
+    if not 0 <= spend_ratio <= 1:
+        return ["SPEND_RATIO_OUT_OF_RANGE"]
+    if request.get("audit_status") == "未通过":
         return ["AUDIT_NOT_READY"]
-    if request["objective"] in ("留资", "下单") and not request.get("tracking_ready", True):
+    if request["objective"] in ("留资", "下单") and "tracking_ready" not in request:
+        return ["MISSING_TRACKING_READY"]
+    if request["objective"] in ("留资", "下单") and request["tracking_ready"] is not True:
         return ["TRACKING_NOT_READY"]
     return []
 
@@ -94,6 +171,7 @@ def candidate_multipliers(daily_budget: float, spend_ratio: float) -> tuple[floa
 
 
 def simulate_request(request: dict, benchmarks: dict) -> list[dict]:
+    request = normalize_request(request)
     errors = validate_request(request)
     if errors:
         return [{"status": "refused", "reason_code": "|".join(errors)}]
@@ -112,21 +190,25 @@ def simulate_request(request: dict, benchmarks: dict) -> list[dict]:
 
     budget = f(request["daily_budget"])
     current_bid = f(request["current_bid"])
-    spend_ratio = f(request.get("spend_ratio", 0.60))
+    spend_ratio = f(request["spend_ratio"])
     objective = request["objective"]
     baseline_cost = metrics[cost_metric]["P50"]
+    current_bid_to_anchor = current_bid / baseline_cost
     baseline_capacity = (
         budget / baseline_cost * 1000 if config["billing"] == "CPM" else budget / baseline_cost
     ) * (0.65 + 0.45 * min(1.0, spend_ratio))
 
     rows: list[dict] = []
     for k in candidate_multipliers(budget, spend_ratio):
-        rel = response(k, config["alpha"], config["beta"])
+        candidate_bid = current_bid * k
+        candidate_bid_to_anchor = candidate_bid / baseline_cost
+        rel = response(candidate_bid_to_anchor, current_bid_to_anchor, config["alpha"], config["beta"])
         for case_name, case in CASES.items():
             ctr = metrics["点击率CTR"][case["ctr"]]
             cvr = metrics["转化率CVR"][case["cvr"]]
             base_cost = metrics[cost_metric][case["cost"]]
-            estimated_cost = base_cost * (k ** 0.72)
+            # 当前价相对同组成本锚点的位置会影响候选单位成本；指数<1表示成本次线性变化。
+            estimated_cost = base_cost * (candidate_bid_to_anchor ** 0.72)
 
             if config["billing"] == "CPM":
                 traffic_impressions = baseline_capacity * rel
@@ -153,7 +235,10 @@ def simulate_request(request: dict, benchmarks: dict) -> list[dict]:
                 "budget_band": request.get("budget_band", "用户输入"), "daily_budget": round(budget, 4),
                 "current_bid": round(current_bid, 4), "spend_ratio": round(spend_ratio, 4),
                 "case": case_name, "candidate_multiplier": k,
-                "candidate_bid": round(current_bid * k, 4), "alpha": config["alpha"], "beta": config["beta"],
+                "candidate_bid": round(candidate_bid, 4),
+                "current_bid_to_anchor": round(current_bid_to_anchor, 6),
+                "candidate_bid_to_anchor": round(candidate_bid_to_anchor, 6),
+                "alpha": config["alpha"], "beta": config["beta"],
                 "relative_delivery": round(rel, 6), "estimated_unit_cost": round(estimated_cost, 6),
                 "simulated_impressions": round(impressions, 4), "simulated_clicks": round(clicks, 4),
                 "simulated_conversions": round(conversions, 4), "simulated_spend": round(spend, 4),
@@ -195,6 +280,7 @@ def recommendation(rows: list[dict]) -> dict:
         "parameter_version": PARAM_VERSION, "industry": rows[0]["industry"], "ad_type": rows[0]["ad_type"],
         "billing_type": rows[0]["billing_type"], "objective": rows[0]["objective"],
         "daily_budget": rows[0]["daily_budget"], "current_bid": rows[0]["current_bid"],
+        "current_bid_to_anchor": rows[0]["current_bid_to_anchor"],
         "spend_ratio": rows[0]["spend_ratio"], "test_band_low": low, "first_test_multiplier": best_k,
         "test_band_high": high, "first_test_bid": round(f(rows[0]["current_bid"]) * best_k, 4),
         "reason_code": reason, "observe": "消耗速度、目标指标、单位成本",

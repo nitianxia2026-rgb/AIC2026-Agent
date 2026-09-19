@@ -60,3 +60,50 @@ scripts/
 ## 7. 公开助手自动化测试
 
 浏览器脚本及运行说明位于 `公开助手自动化测试/`。它只采集回答和截图，不自动判定通过；判定结果登记到陈钰涛固定交付目录。
+
+## 8. 出价仿真 API 候选
+
+`bid_api.py` 是 `bid-sim-v1.2` 的零第三方依赖、只读 HTTP 封装，提供：
+
+- `GET /healthz`
+- `GET /openapi.json`
+- `POST /bid-simulate`
+
+本地验收：
+
+```bash
+python3 verify_bid_api.py
+```
+
+当前版本：`bid-api-v0.2`＋`bid-sim-v1.2`。本地结果为10/10 PASS，其中包含10次连续一致调用、OpenAPI契约、API Key鉴权、非法JSON、计费冲突、消耗比例缺失、回传状态缺失和回传未就绪拒绝。API不再默认“消耗60%”“审核通过”或“回传就绪”。该结果只证明本地封装可用，不等于已部署或比赛平台可访问。
+
+正式接入硬门：部署为稳定HTTPS；设置`BID_SIM_API_KEY`；从比赛网络完成10次连续成功；在助手中验证正常、缺参和失败降级；保留KB-04兜底。任何一项不通过，都不把API挂入正式助手。
+
+### 8.1 部署包
+
+- `Dockerfile`：只复制API、算法和KB-02合成基准CSV；容器监听`PORT`环境变量。
+- `render.yaml`：Render Blueprint示例，需在服务端设置秘密变量`BID_SIM_API_KEY`。
+- `.dockerignore`：避免把其他数据和报告打进镜像。
+
+部署完成后导出平台可导入的OpenAPI文件：
+
+```bash
+python3 export_bid_openapi.py --server-url https://你的稳定域名
+```
+
+生成`bid_simulate.openapi.json`。不得把真实API Key写进Schema、仓库、截图或聊天；Key只填平台的鉴权/请求头配置，Header名为`X-API-Key`。
+
+### 8.2 平台挂载字段（以实际界面为准）
+
+依据2026-09-18平台截图，操作如下：
+
+1. 助手“工具”页选择“创建API工具”。
+2. 名称填`投手智囊-出价测试带`。
+3. 在“OpenAPI Schema”文本框直接粘贴`bid_simulate.openapi.json`；也可点“从URL导入”，填写`https://你的域名/openapi.json`。
+4. “鉴权方式”选择“API Key”。Schema声明的Header名为`X-API-Key`；密钥只填平台鉴权字段，不写入Schema。
+5. 确认“可用工具”只出现一行：名称`bid_simulate`、方法`post`、路径`/bid-simulate`。若出现健康检查工具，说明Schema版本错误，不保存。
+6. 点击该行“测试”，完成正常请求后再保存。随后挂到助手，并测试缺消耗比例、缺回传状态、计费冲突和服务不可用降级。
+
+### 8.3 为什么当前不做自定义MCP
+
+平台官方MCP说明确认：线上MCP必须使用`sse`或`http/streamable`协议，配置根节点为`mcpServers`，服务端需要支持MCP连接和工具发现；`stdio`仅限本机测试。当前`bid_api.py`是REST/OpenAPI服务，不是MCP Server，不能把URL填进MCP配置冒充接入。API工具已经原生覆盖单一出价仿真能力，额外包装MCP不增加业务链路，只增加传输和运维风险。
